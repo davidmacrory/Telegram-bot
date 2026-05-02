@@ -1,31 +1,60 @@
 import os
-import requests
+import logging
+from openai import OpenAI
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+# --- Logging ---
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-def ask_openai(message):
-    url = "https://api.openai.com/v1/responses"
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    json_data = {
-        "model": "gpt-5.3",
-        "input": message
-    }
+# --- Environment variables ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-    response = requests.post(url, headers=headers, json=json_data)
-    return response.json()["output"][0]["content"][0]["text"]
+# --- OpenAI client ---
+client = OpenAI(api_key=OPENAI_API_KEY)
 
+# --- OpenAI function ---
+def ask_openai(user_message: str) -> str:
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant. Be concise and friendly."},
+                {"role": "user", "content": user_message}
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"OpenAI error: {e}")
+        return "Sorry, something went wrong."
+
+# --- Telegram handler ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message and update.message.text:
-        reply = ask_openai(update.message.text)
-        await update.message.reply_text(reply)
+    if not update.message or not update.message.text:
+        return
 
-app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    user_text = update.message.text
+    reply = ask_openai(user_text)
 
-app.run_polling()
+    await update.message.reply_text(reply)
+
+# --- Main ---
+def main():
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("Missing TELEGRAM_BOT_TOKEN")
+
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    logger.info("Bot is running...")
+    app.run_polling()
+
+# --- Run ---
+if __name__ == "__main__":
+    main()
