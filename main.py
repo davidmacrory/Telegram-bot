@@ -50,7 +50,7 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    main() async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
