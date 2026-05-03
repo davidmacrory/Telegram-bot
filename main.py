@@ -1,7 +1,7 @@
 import os
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from telegram import Update
 from telegram.ext import (
@@ -13,12 +13,16 @@ from telegram.ext import (
 )
 
 # =========================
-# ENV VARIABLES
+# ENV VARIABLES (LOCKED)
 # =========================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # not used yet, but valid
+
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN not set")
 
 # =========================
-# DATABASE SETUP
+# DATABASE
 # =========================
 DB_PATH = "data.db"
 
@@ -63,29 +67,21 @@ def get_today_events():
     return [r[0] for r in rows]
 
 # =========================
-# REMINDER SYSTEM
+# REMINDER CALLBACK
 # =========================
 async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
-
     await context.bot.send_message(
         chat_id=job.chat_id,
         text=f"⏰ Reminder: {job.data}"
     )
 
 def parse_reminder(text):
-    """
-    Supports:
-    - remind me in 1 minute to X
-    - remind me in 10 minutes to X
-    """
-
     match = re.search(r"in (\d+) minute", text.lower())
     if not match:
         return None, None
 
     minutes = int(match.group(1))
-
     message = text.lower().split("to", 1)[-1].strip()
 
     return minutes * 60, message
@@ -105,18 +101,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    # -------------------------
-    # LOGGING
-    # -------------------------
+    # LOG
     if text.lower().startswith("log:"):
         entry = text.split("log:", 1)[1].strip()
         log_event(entry)
         await update.message.reply_text(f"Logged: {entry}")
         return
 
-    # -------------------------
     # SUMMARY
-    # -------------------------
     if "summary today" in text.lower():
         events = get_today_events()
 
@@ -128,9 +120,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # -------------------------
     # REMINDER
-    # -------------------------
     if "remind me" in text.lower():
         try:
             delay, message = parse_reminder(text)
@@ -141,12 +131,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            if context.job_queue is None:
-                await update.message.reply_text("JobQueue not available ❌")
-                print("ERROR: job_queue is None")
+            job_queue = context.application.job_queue
+
+            if job_queue is None:
+                print("ERROR: JobQueue missing")
+                await update.message.reply_text("Reminder system unavailable ❌")
                 return
 
-            context.job_queue.run_once(
+            job_queue.run_once(
                 reminder_callback,
                 delay,
                 chat_id=update.effective_chat.id,
@@ -161,27 +153,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # -------------------------
     # DEFAULT
-    # -------------------------
-    await update.message.reply_text(
-        "Try: log:, remind me, summary today"
-    )
+    await update.message.reply_text("Try: log:, remind me, summary today")
 
 # =========================
 # MAIN
 # =========================
 def main():
-    if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN not set")
-
     init_db()
 
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .build()
-    )
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
