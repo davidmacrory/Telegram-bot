@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import re
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -21,12 +22,6 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN not set")
-
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not set")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -75,7 +70,27 @@ def get_today_events():
     return [r[0] for r in rows]
 
 # -----------------------
-# OPENAI INTENT PARSER
+# REMINDER PARSER
+# -----------------------
+def parse_reminder(text):
+    match = re.search(r"remind me in (\d+) (minute|minutes|hour|hours)", text.lower())
+    if not match:
+        return None
+
+    value = int(match.group(1))
+    unit = match.group(2)
+
+    seconds = value * 60 if "minute" in unit else value * 3600
+    return seconds
+
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(
+        chat_id=context.job.chat_id,
+        text=context.job.data
+    )
+
+# -----------------------
+# OPENAI INTENT
 # -----------------------
 def interpret(text):
     response = client.chat.completions.create(
@@ -84,20 +99,13 @@ def interpret(text):
             {
                 "role": "system",
                 "content": """
-You are a personal assistant.
+Classify:
+- log
+- summary
+- chat
 
-Classify the user's message into ONE of:
-- log (user did something)
-- summary (user wants today's summary)
-- chat (normal conversation)
-
-Return ONLY valid JSON like:
-{"type":"log","text":"turned compost"}
-
-Rules:
-- If user says they did something → log
-- If asking about today → summary
-- Otherwise → chat
+Return JSON:
+{"type":"log","text":"..."}
 """
             },
             {"role": "user", "content": text}
@@ -105,27 +113,39 @@ Rules:
         temperature=0
     )
 
-    return response.choices[0].message.content
+    return json.loads(response.choices[0].message.content)
 
 # -----------------------
-# TELEGRAM HANDLER
+# HANDLER
 # -----------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
+    # 🔔 Reminder first (no AI needed)
+    seconds = parse_reminder(text)
+    if seconds:
+        context.job_queue.run_once(
+            send_reminder,
+            seconds,
+            chat_id=update.effective_chat.id,
+            data=text
+        )
+        await update.message.reply_text("Reminder set ⏰")
+        return
+
+    # 🤖 AI interpretation
     try:
         result = interpret(text)
-        data = json.loads(result)
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
         return
 
-    if data["type"] == "log":
-        log_event(data.get("text", text))
-        await update.message.reply_text(f"Logged: {data.get('text', text)}")
+    if result["type"] == "log":
+        log_event(result.get("text", text))
+        await update.message.reply_text(f"Logged: {result.get('text', text)}")
         return
 
-    if data["type"] == "summary":
+    if result["type"] == "summary":
         events = get_today_events()
 
         if not events:
@@ -136,8 +156,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    # fallback chat
-    await update.message.reply_text("Got it 👍")
+    await update.message.reply_text("👍")
 
 # -----------------------
 # MAIN
