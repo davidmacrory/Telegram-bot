@@ -88,7 +88,7 @@ Message: {text}
 """
 
     response = client.chat.completions.create(
-        model="gpt-5.3-mini",
+        model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -163,7 +163,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # DEFAULT CHAT (OpenAI)
     response = client.chat.completions.create(
-        model="gpt-5.3-mini",
+        model="gpt-4o-mini",
         messages=[{"role": "user", "content": text}],
     )
 
