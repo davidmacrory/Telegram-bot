@@ -1,9 +1,11 @@
-from dotenv import load_dotenv
-load_dotenv()
 import os
+import json
 import re
 import sqlite3
 from datetime import datetime
+
+from dotenv import load_dotenv
+from openai import OpenAI
 
 from telegram import Update
 from telegram.ext import (
@@ -15,16 +17,17 @@ from telegram.ext import (
 )
 
 # =========================
-# ENV VARIABLES (LOCKED)
+# ENV
 # =========================
+load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # not used yet, but valid
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN not set")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
-# DATABASE
+# DB
 # =========================
 DB_PATH = "data.db"
 
@@ -54,109 +57,124 @@ def log_event(text):
 def get_today_events():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     today = datetime.now().date().isoformat()
 
     c.execute("""
         SELECT text FROM events
         WHERE date(timestamp) = ?
-        ORDER BY timestamp ASC
     """, (today,))
 
     rows = c.fetchall()
     conn.close()
-
     return [r[0] for r in rows]
 
 # =========================
-# REMINDER CALLBACK
+# OPENAI INTENT PARSER
 # =========================
-async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
+def interpret(text):
+    prompt = f"""
+Classify this message into JSON:
+
+Possible intents:
+- log
+- reminder
+- summary
+- chat
+
+Respond ONLY with JSON like:
+{{"intent": "...", "content": "..."}}
+
+Message: {text}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-5.3-mini",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    raw = response.choices[0].message.content
+
+    try:
+        return json.loads(raw)
+    except:
+        return {"intent": "chat", "content": text}
+
+# =========================
+# REMINDER
+# =========================
+async def reminder_callback(context):
     job = context.job
     await context.bot.send_message(
         chat_id=job.chat_id,
         text=f"⏰ Reminder: {job.data}"
     )
 
-def parse_reminder(text):
-    match = re.search(r"in (\d+) minute", text.lower())
-    if not match:
-        return None, None
-
-    minutes = int(match.group(1))
-    message = text.lower().split("to", 1)[-1].strip()
-
-    return minutes * 60, message
+def extract_minutes(text):
+    match = re.search(r"(\d+)\s*minute", text.lower())
+    if match:
+        return int(match.group(1))
+    return 1
 
 # =========================
-# HANDLERS
+# HANDLER
 # =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Ready.\n"
-        "Try:\n"
-        "- log: turned compost\n"
-        "- remind me in 1 minute to check compost\n"
-        "- summary today"
-    )
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
+    result = interpret(text)
+    intent = result.get("intent")
+    content = result.get("content", text)
+
     # LOG
-    if text.lower().startswith("log:"):
-        entry = text.split("log:", 1)[1].strip()
-        log_event(entry)
-        await update.message.reply_text(f"Logged: {entry}")
+    if intent == "log":
+        log_event(content)
+        await update.message.reply_text(f"Logged: {content}")
         return
 
     # SUMMARY
-    if "summary today" in text.lower():
+    if intent == "summary":
         events = get_today_events()
-
         if not events:
-            await update.message.reply_text("Nothing logged today.")
+            await update.message.reply_text("Nothing today.")
         else:
             msg = "Today:\n" + "\n".join(f"- {e}" for e in events)
             await update.message.reply_text(msg)
-
         return
 
     # REMINDER
-    if "remind me" in text.lower():
-        try:
-            delay, message = parse_reminder(text)
+    if intent == "reminder":
+        minutes = extract_minutes(text)
 
-            if delay is None:
-                await update.message.reply_text(
-                    "Format: remind me in X minutes to do something"
-                )
-                return
+        job_queue = context.application.job_queue
 
-            job_queue = context.application.job_queue
+        if job_queue is None:
+            await update.message.reply_text("Reminder system unavailable ❌")
+            return
 
-            if job_queue is None:
-                print("ERROR: JobQueue missing")
-                await update.message.reply_text("Reminder system unavailable ❌")
-                return
+        job_queue.run_once(
+            reminder_callback,
+            minutes * 60,
+            chat_id=update.effective_chat.id,
+            data=content,
+        )
 
-            job_queue.run_once(
-                reminder_callback,
-                delay,
-                chat_id=update.effective_chat.id,
-                data=message,
-            )
-
-            await update.message.reply_text("Reminder set 👍")
-
-        except Exception as e:
-            print(f"REMINDER ERROR: {e}")
-            await update.message.reply_text(f"Error: {e}")
-
+        await update.message.reply_text(f"Reminder set for {minutes} min 👍")
         return
 
-    # DEFAULT
-    await update.message.reply_text("Try: log:, remind me, summary today")
+    # DEFAULT CHAT (OpenAI)
+    response = client.chat.completions.create(
+        model="gpt-5.3-mini",
+        messages=[{"role": "user", "content": text}],
+    )
+
+    reply = response.choices[0].message.content
+    await update.message.reply_text(reply)
+
+# =========================
+# START
+# =========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Ready. Just talk normally 👍")
 
 # =========================
 # MAIN
