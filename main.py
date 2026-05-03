@@ -1,9 +1,7 @@
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta
-
-from dotenv import load_dotenv
-from openai import OpenAI
 
 from telegram import Update
 from telegram.ext import (
@@ -14,19 +12,14 @@ from telegram.ext import (
     filters,
 )
 
-# -----------------------
-# ENV
-# -----------------------
-load_dotenv()
+# =========================
+# ENV VARIABLES
+# =========================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# -----------------------
-# DB SETUP
-# -----------------------
+# =========================
+# DATABASE SETUP
+# =========================
 DB_PATH = "data.db"
 
 def init_db():
@@ -42,35 +35,16 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
-
-# -----------------------
-# COMMANDS
-# -----------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Ready. Try:\n"
-        "- log: turned compost\n"
-        "- remind me in 1 minute to check compost\n"
-        "- summary today"
-    )
-
-# -----------------------
-# LOG EVENT
-# -----------------------
 def log_event(text):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
         "INSERT INTO events (text, timestamp) VALUES (?, ?)",
-        (text, datetime.now().isoformat())
+        (text, datetime.now().isoformat()),
     )
     conn.commit()
     conn.close()
 
-# -----------------------
-# GET TODAY EVENTS
-# -----------------------
 def get_today_events():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -80,7 +54,7 @@ def get_today_events():
     c.execute("""
         SELECT text FROM events
         WHERE date(timestamp) = ?
-        ORDER BY timestamp DESC
+        ORDER BY timestamp ASC
     """, (today,))
 
     rows = c.fetchall()
@@ -88,96 +62,129 @@ def get_today_events():
 
     return [r[0] for r in rows]
 
-# -----------------------
-# REMINDER CALLBACK
-# -----------------------
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.chat_id
-    text = context.job.data
-    await context.bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {text}")
+# =========================
+# REMINDER SYSTEM
+# =========================
+async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
 
-# -----------------------
-# PARSE REMINDER
-# -----------------------
+    await context.bot.send_message(
+        chat_id=job.chat_id,
+        text=f"⏰ Reminder: {job.data}"
+    )
+
 def parse_reminder(text):
-    try:
-        if "in" in text and "minute" in text:
-            parts = text.split("in")[1].strip()
-            minutes = int(parts.split("minute")[0].strip())
-            message = text.split("to", 1)[1].strip()
-            return minutes * 60, message
-    except:
+    """
+    Supports:
+    - remind me in 1 minute to X
+    - remind me in 10 minutes to X
+    """
+
+    match = re.search(r"in (\d+) minute", text.lower())
+    if not match:
         return None, None
 
-    return None, None
+    minutes = int(match.group(1))
 
-# -----------------------
-# OPENAI RESPONSE
-# -----------------------
-def ask_openai(prompt):
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+    message = text.lower().split("to", 1)[-1].strip()
+
+    return minutes * 60, message
+
+# =========================
+# HANDLERS
+# =========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Ready.\n"
+        "Try:\n"
+        "- log: turned compost\n"
+        "- remind me in 1 minute to check compost\n"
+        "- summary today"
     )
-    return response.choices[0].message.content
 
-# -----------------------
-# MAIN MESSAGE HANDLER
-# -----------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.lower()
+    text = update.message.text
 
-    # --- LOG ---
-    if text.startswith("log:"):
-        entry = text.replace("log:", "").strip()
+    # -------------------------
+    # LOGGING
+    # -------------------------
+    if text.lower().startswith("log:"):
+        entry = text.split("log:", 1)[1].strip()
         log_event(entry)
         await update.message.reply_text(f"Logged: {entry}")
         return
 
-    # --- SUMMARY ---
-    if "summary today" in text:
+    # -------------------------
+    # SUMMARY
+    # -------------------------
+    if "summary today" in text.lower():
         events = get_today_events()
+
         if not events:
             await update.message.reply_text("Nothing logged today.")
         else:
             msg = "Today:\n" + "\n".join(f"- {e}" for e in events)
             await update.message.reply_text(msg)
+
         return
 
-    # --- REMINDER ---
-    if "remind me" in text:
-        delay, message = parse_reminder(text)
+    # -------------------------
+    # REMINDER
+    # -------------------------
+    if "remind me" in text.lower():
+        try:
+            delay, message = parse_reminder(text)
 
-        if delay and context.job_queue:
+            if delay is None:
+                await update.message.reply_text(
+                    "Format: remind me in X minutes to do something"
+                )
+                return
+
+            if context.job_queue is None:
+                await update.message.reply_text("JobQueue not available ❌")
+                print("ERROR: job_queue is None")
+                return
+
             context.job_queue.run_once(
-                send_reminder,
+                reminder_callback,
                 delay,
                 chat_id=update.effective_chat.id,
-                data=message
+                data=message,
             )
-            await update.message.reply_text(f"Reminder set: {message}")
-        else:
-            await update.message.reply_text("Couldn't set reminder.")
+
+            await update.message.reply_text("Reminder set 👍")
+
+        except Exception as e:
+            print(f"REMINDER ERROR: {e}")
+            await update.message.reply_text(f"Error: {e}")
+
         return
 
-    # --- DEFAULT → OPENAI ---
-    try:
-        reply = ask_openai(text)
-        await update.message.reply_text(reply)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    # -------------------------
+    # DEFAULT
+    # -------------------------
+    await update.message.reply_text(
+        "Try: log:, remind me, summary today"
+    )
 
-# -----------------------
+# =========================
 # MAIN
-# -----------------------
+# =========================
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    if not TELEGRAM_TOKEN:
+        raise ValueError("TELEGRAM_TOKEN not set")
 
-    # handlers
+    init_db()
+
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-
 
     print("Bot running...")
     app.run_polling(drop_pending_updates=True)
