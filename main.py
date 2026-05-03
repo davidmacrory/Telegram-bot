@@ -1,80 +1,63 @@
 import os
-import requests
-from dotenv import load_dotenv
-
+import logging
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from openai import OpenAI
 
-# Load environment variables
-load_dotenv()
+# --- Logging ---
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# --- Env vars ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-print("Telegram Token Loaded:", TELEGRAM_BOT_TOKEN is not None)
-print("OpenAI Key Loaded:", OPENAI_API_KEY is not None)
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
+    raise ValueError("Missing TELEGRAM_BOT_TOKEN or OPENAI_API_KEY")
 
+# --- OpenAI client ---
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# 🔥 OpenAI function (NO silent failures)
-def ask_openai(prompt):
-    url = "https://api.openai.com/v1/responses"
+# --- Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bot is running. Ask me anything.")
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
 
-    data = {
-        "model": "gpt-4.1-mini",
-        "input": prompt
-    }
+    logging.info(f"Received: {user_message}")
 
     try:
-        response = requests.post(url, headers=headers, json=data)
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=user_message,
+            timeout=15
+        )
 
-        print("STATUS:", response.status_code)
-        print("RAW RESPONSE:", response.text)
+        reply = response.output_text
 
-        if response.status_code != 200:
-            return f"❌ OpenAI Error:\n{response.text}"
-
-        result = response.json()
-
-        return result["output"][0]["content"][0]["text"]
+        if not reply:
+            reply = "I didn’t get a proper response. Try again."
 
     except Exception as e:
-        return f"❌ Exception: {str(e)}"
+        logging.error(f"OpenAI error: {e}")
+        reply = "Something went wrong — try again."
 
-
-# 📩 Telegram message handler
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-
-    print("User:", user_text)
-
-    reply = ask_openai(user_text)
-
-    print("Bot:", reply)
+    # Telegram message limit safeguard
+    if len(reply) > 4000:
+        reply = reply[:4000]
 
     await update.message.reply_text(reply)
 
+# --- App ---
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-# 🚀 Main entry point
-def main():
-    if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("Missing TELEGRAM_BOT_TOKEN")
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    if not OPENAI_API_KEY:
-        raise ValueError("Missing OPENAI_API_KEY")
-
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("🤖 Bot running...")
-
-    app.run_polling()
-
-
+# --- Run ---
 if __name__ == "__main__":
-    main()
+    logging.info("Starting bot...")
+    app.run_polling(drop_pending_updates=True)
